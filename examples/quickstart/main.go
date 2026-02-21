@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 
-	claude "github.com/anthropics/go-claude-agent-sdk"
+	claude "github.com/wanpengxie/go-claude-agent-sdk"
 )
 
 func main() {

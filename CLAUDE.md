@@ -21,7 +21,7 @@ go test -run TestParseAssistantMessage ./...
 
 ## Module
 
-- Module path: `github.com/anthropics/go-claude-agent-sdk`
+- Module path: `github.com/wanpengxie/go-claude-agent-sdk`
 - Go version: 1.24+
 - Package name: `claude`
 

@@ -1,3 +1,3 @@
-module github.com/anthropics/go-claude-agent-sdk
+module github.com/wanpengxie/go-claude-agent-sdk
 
 go 1.25.7
