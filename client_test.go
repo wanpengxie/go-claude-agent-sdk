@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -271,5 +272,46 @@ func TestClientQuerySendsMessage(t *testing.T) {
 		if msg["type"] != "user" {
 			t.Errorf("expected message type 'user', got %v", msg["type"])
 		}
+	}
+}
+
+func TestClientQueryWithSessionFailsWhenConnectionInactive(t *testing.T) {
+	client, _ := testableClient(t, queryOptions{})
+	defer client.Close()
+
+	client.transport = &subprocessTransport{ready: false}
+
+	err := client.QueryWithSession(context.Background(), "hello", "sess-1")
+	if err == nil {
+		t.Fatal("expected connection inactive error")
+	}
+	var connErr *CLIConnectionError
+	if !errors.As(err, &connErr) {
+		t.Fatalf("expected CLIConnectionError, got %T", err)
+	}
+	if !strings.Contains(err.Error(), "Connection is no longer active") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestClientQueryWithSessionIncludesTransportExitError(t *testing.T) {
+	client, _ := testableClient(t, queryOptions{})
+	defer client.Close()
+
+	client.transport = &subprocessTransport{
+		ready:   true,
+		exitErr: errors.New("process crashed"),
+	}
+
+	err := client.QueryWithSession(context.Background(), "hello", "sess-1")
+	if err == nil {
+		t.Fatal("expected connection inactive error")
+	}
+	var connErr *CLIConnectionError
+	if !errors.As(err, &connErr) {
+		t.Fatalf("expected CLIConnectionError, got %T", err)
+	}
+	if !strings.Contains(err.Error(), "process crashed") {
+		t.Fatalf("expected wrapped transport error, got: %v", err)
 	}
 }

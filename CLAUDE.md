@@ -52,6 +52,7 @@ Single-package design (`package claude`) to avoid import cycles. All public type
 - **Functional options**: `claude.WithModel("...")`, `claude.WithMaxTurns(5)` etc.
 - **Channels for async**: `Query()` returns `(<-chan Message, <-chan error)`
 - **Context propagation**: All public methods accept `context.Context`
+  - `ClaudeClient.Connect(ctx)` uses `ctx` for connect/initialize timeout only; client stream lifecycle is owned by `client.Close()`
 
 ## Conventions
 

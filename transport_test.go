@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildCommandBasic(t *testing.T) {
@@ -257,5 +261,38 @@ func TestReadMessagesSkipsNonJSONPrelude(t *testing.T) {
 	}
 	if err := tr.LastError(); err != nil {
 		t.Fatalf("expected no transport error, got %v", err)
+	}
+}
+
+func TestConnectContextDoesNotOwnTransportLifecycle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script test")
+	}
+
+	scriptPath := filepath.Join(t.TempDir(), "fake-claude.sh")
+	script := "#!/bin/sh\nsleep 5\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	tr := newSubprocessTransport(&AgentOptions{CLIPath: scriptPath})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := tr.Connect(ctx); err != nil {
+		cancel()
+		t.Fatalf("connect failed: %v", err)
+	}
+	cancel()
+
+	time.Sleep(100 * time.Millisecond)
+	if !tr.IsReady() {
+		t.Fatalf("transport should stay ready after connect ctx cancellation, lastErr=%v", tr.LastError())
+	}
+	if err := tr.Write("{\"type\":\"user\"}\n"); err != nil {
+		t.Fatalf("write should still succeed after connect ctx cancellation: %v", err)
+	}
+
+	if err := tr.Close(); err != nil {
+		t.Fatalf("close failed: %v", err)
 	}
 }

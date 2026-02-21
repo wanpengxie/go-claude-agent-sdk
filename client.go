@@ -88,11 +88,19 @@ func (c *ClaudeClient) Connect(ctx context.Context) error {
 		Agents:            agentsMap,
 	})
 
-	if err := c.query.start(ctx); err != nil {
+	// The connect context is only for handshake/initialize timeout.
+	// Reader lifecycle is managed by client.Close().
+	if err := c.query.start(context.Background()); err != nil {
+		_ = c.transport.Close()
+		c.transport = nil
+		c.query = nil
 		return err
 	}
 
 	if _, err := c.query.initialize(ctx); err != nil {
+		c.query.close()
+		c.query = nil
+		c.transport = nil
 		return err
 	}
 
@@ -107,10 +115,11 @@ func (c *ClaudeClient) Query(ctx context.Context, prompt string) error {
 // QueryWithSession sends a new string prompt with explicit session ID.
 func (c *ClaudeClient) QueryWithSession(ctx context.Context, prompt string, sessionID string) error {
 	c.mu.Lock()
-	if c.query == nil || c.transport == nil {
+	if err := c.ensureConnectedLocked(); err != nil {
 		c.mu.Unlock()
-		return &CLIConnectionError{SDKError: SDKError{Message: "Not connected. Call Connect() first."}}
+		return err
 	}
+	transport := c.transport
 	c.mu.Unlock()
 	if sessionID == "" {
 		sessionID = "default"
@@ -123,17 +132,18 @@ func (c *ClaudeClient) QueryWithSession(ctx context.Context, prompt string, sess
 		"session_id":         sessionID,
 	}
 	data, _ := json.Marshal(message)
-	return c.transport.Write(string(data) + "\n")
+	return transport.Write(string(data) + "\n")
 }
 
 // QueryStream sends streaming messages with optional default session ID.
 // Existing session_id on each message is preserved.
 func (c *ClaudeClient) QueryStream(ctx context.Context, messages <-chan map[string]any, defaultSessionID string) error {
 	c.mu.Lock()
-	if c.query == nil || c.transport == nil {
+	if err := c.ensureConnectedLocked(); err != nil {
 		c.mu.Unlock()
-		return &CLIConnectionError{SDKError: SDKError{Message: "Not connected. Call Connect() first."}}
+		return err
 	}
+	transport := c.transport
 	c.mu.Unlock()
 	if defaultSessionID == "" {
 		defaultSessionID = "default"
@@ -154,7 +164,7 @@ func (c *ClaudeClient) QueryStream(ctx context.Context, messages <-chan map[stri
 				msg["session_id"] = defaultSessionID
 			}
 			data, _ := json.Marshal(msg)
-			if err := c.transport.Write(string(data) + "\n"); err != nil {
+			if err := transport.Write(string(data) + "\n"); err != nil {
 				return err
 			}
 		}
@@ -257,18 +267,26 @@ func (c *ClaudeClient) ReceiveResponseWithErrors(ctx context.Context) (<-chan Me
 
 // Interrupt sends an interrupt signal.
 func (c *ClaudeClient) Interrupt(ctx context.Context) error {
-	if c.query == nil {
-		return &CLIConnectionError{SDKError: SDKError{Message: "Not connected. Call Connect() first."}}
+	c.mu.Lock()
+	if err := c.ensureConnectedLocked(); err != nil {
+		c.mu.Unlock()
+		return err
 	}
-	return c.query.interrupt(ctx)
+	query := c.query
+	c.mu.Unlock()
+	return query.interrupt(ctx)
 }
 
 // SetPermissionMode changes the permission mode during conversation.
 func (c *ClaudeClient) SetPermissionMode(ctx context.Context, mode PermissionMode) error {
-	if c.query == nil {
-		return &CLIConnectionError{SDKError: SDKError{Message: "Not connected. Call Connect() first."}}
+	c.mu.Lock()
+	if err := c.ensureConnectedLocked(); err != nil {
+		c.mu.Unlock()
+		return err
 	}
-	return c.query.setPermissionMode(ctx, string(mode))
+	query := c.query
+	c.mu.Unlock()
+	return query.setPermissionMode(ctx, string(mode))
 }
 
 // SetModel changes the AI model during conversation.
@@ -278,29 +296,41 @@ func (c *ClaudeClient) SetModel(ctx context.Context, model string) error {
 
 // SetModelOptional changes model; nil means reset to CLI default model.
 func (c *ClaudeClient) SetModelOptional(ctx context.Context, model *string) error {
-	if c.query == nil {
-		return &CLIConnectionError{SDKError: SDKError{Message: "Not connected. Call Connect() first."}}
+	c.mu.Lock()
+	if err := c.ensureConnectedLocked(); err != nil {
+		c.mu.Unlock()
+		return err
 	}
+	query := c.query
+	c.mu.Unlock()
 	if model == nil {
-		return c.query.setModelOptional(ctx, nil)
+		return query.setModelOptional(ctx, nil)
 	}
-	return c.query.setModelOptional(ctx, *model)
+	return query.setModelOptional(ctx, *model)
 }
 
 // RewindFiles rewinds tracked files to a specific user message state.
 func (c *ClaudeClient) RewindFiles(ctx context.Context, userMessageID string) error {
-	if c.query == nil {
-		return &CLIConnectionError{SDKError: SDKError{Message: "Not connected. Call Connect() first."}}
+	c.mu.Lock()
+	if err := c.ensureConnectedLocked(); err != nil {
+		c.mu.Unlock()
+		return err
 	}
-	return c.query.rewindFiles(ctx, userMessageID)
+	query := c.query
+	c.mu.Unlock()
+	return query.rewindFiles(ctx, userMessageID)
 }
 
 // GetMCPStatus gets current MCP server connection status.
 func (c *ClaudeClient) GetMCPStatus(ctx context.Context) (map[string]any, error) {
-	if c.query == nil {
-		return nil, &CLIConnectionError{SDKError: SDKError{Message: "Not connected. Call Connect() first."}}
+	c.mu.Lock()
+	if err := c.ensureConnectedLocked(); err != nil {
+		c.mu.Unlock()
+		return nil, err
 	}
-	return c.query.getMcpStatus(ctx)
+	query := c.query
+	c.mu.Unlock()
+	return query.getMcpStatus(ctx)
 }
 
 // Close disconnects from Claude Code and cleans up resources.
@@ -316,8 +346,36 @@ func (c *ClaudeClient) Close() error {
 	if c.query != nil {
 		c.query.close()
 		c.query = nil
+	} else if c.transport != nil {
+		_ = c.transport.Close()
 	}
 	c.transport = nil
+	return nil
+}
+
+func (c *ClaudeClient) ensureConnectedLocked() error {
+	if c.query == nil || c.transport == nil {
+		return &CLIConnectionError{SDKError: SDKError{Message: "Not connected. Call Connect() first."}}
+	}
+	if err := c.query.err(); err != nil {
+		return &CLIConnectionError{
+			SDKError: SDKError{
+				Message: "Connection is no longer active",
+				Cause:   err,
+			},
+		}
+	}
+	if err := c.transport.LastError(); err != nil {
+		return &CLIConnectionError{
+			SDKError: SDKError{
+				Message: "Connection is no longer active",
+				Cause:   err,
+			},
+		}
+	}
+	if !c.transport.IsReady() {
+		return &CLIConnectionError{SDKError: SDKError{Message: "Connection is no longer active"}}
+	}
 	return nil
 }
 

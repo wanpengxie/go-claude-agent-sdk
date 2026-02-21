@@ -135,6 +135,15 @@ func (q *queryHandler) readMessages(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			if !q.closed.Load() {
+				err := ctx.Err()
+				if err == nil {
+					err = fmt.Errorf("query handler context cancelled")
+				}
+				q.setReadError(err)
+				q.failPendingRequests(err)
+				q.pushErrorMessage(context.Background(), err)
+			}
 			return
 		case err, ok := <-errChan:
 			if !ok {

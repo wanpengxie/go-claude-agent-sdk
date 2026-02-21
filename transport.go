@@ -319,10 +319,16 @@ func (t *subprocessTransport) Connect(ctx context.Context) error {
 	if t.process != nil {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	cmd := t.buildCommand()
-	t.process = exec.CommandContext(ctx, cmd[0], cmd[1:]...)
+	t.process = exec.CommandContext(lifecycleCtx, cmd[0], cmd[1:]...)
+	t.cancel = lifecycleCancel
 	if err := setProcessUser(t.process, t.options.User); err != nil {
+		lifecycleCancel()
 		return &CLIConnectionError{
 			SDKError: SDKError{
 				Message: "Failed to configure process user",
@@ -354,11 +360,13 @@ func (t *subprocessTransport) Connect(ctx context.Context) error {
 	var err error
 	t.stdin, err = t.process.StdinPipe()
 	if err != nil {
+		lifecycleCancel()
 		return &CLIConnectionError{SDKError: SDKError{Message: "Failed to create stdin pipe", Cause: err}}
 	}
 
 	t.stdout, err = t.process.StdoutPipe()
 	if err != nil {
+		lifecycleCancel()
 		return &CLIConnectionError{SDKError: SDKError{Message: "Failed to create stdout pipe", Cause: err}}
 	}
 
@@ -367,6 +375,7 @@ func (t *subprocessTransport) Connect(ctx context.Context) error {
 	if shouldPipeStderr {
 		t.stderr, err = t.process.StderrPipe()
 		if err != nil {
+			lifecycleCancel()
 			return &CLIConnectionError{SDKError: SDKError{Message: "Failed to create stderr pipe", Cause: err}}
 		}
 	} else {
@@ -377,6 +386,7 @@ func (t *subprocessTransport) Connect(ctx context.Context) error {
 	}
 
 	if err := t.process.Start(); err != nil {
+		lifecycleCancel()
 		if os.IsNotExist(err) {
 			return &CLINotFoundError{
 				CLIConnectionError: CLIConnectionError{SDKError: SDKError{Message: "Claude Code not found at: " + t.cliPath, Cause: err}},
@@ -386,18 +396,19 @@ func (t *subprocessTransport) Connect(ctx context.Context) error {
 		return &CLIConnectionError{SDKError: SDKError{Message: "Failed to start Claude Code", Cause: err}}
 	}
 
-	var readCtx context.Context
-	readCtx, t.cancel = context.WithCancel(context.Background())
-
 	// Start stderr reader
 	if t.stderr != nil {
 		go t.readStderr()
 	}
 
 	// Start stdout reader
-	go t.readMessages(readCtx)
+	go t.readMessages(lifecycleCtx)
 
 	t.ready = true
+	if err := ctx.Err(); err != nil {
+		_ = t.Close()
+		return err
+	}
 	return nil
 }
 
@@ -429,6 +440,11 @@ func (t *subprocessTransport) readStderr() {
 func (t *subprocessTransport) readMessages(ctx context.Context) {
 	defer close(t.msgChan)
 	defer close(t.errChan)
+	defer func() {
+		t.writeMu.Lock()
+		t.ready = false
+		t.writeMu.Unlock()
+	}()
 
 	scanner := bufio.NewScanner(t.stdout)
 	scanner.Buffer(make([]byte, 256*1024), t.maxBufferSize)

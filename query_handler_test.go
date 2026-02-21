@@ -371,3 +371,34 @@ func TestQueryHandlerPropagatesTransportError(t *testing.T) {
 		t.Fatal("expected handler.err() to be set")
 	}
 }
+
+func TestQueryHandlerPropagatesContextCancellationAsError(t *testing.T) {
+	mt := newMockTransport()
+	handler := newQueryHandler(mt, queryOptions{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	_ = handler.start(ctx)
+
+	cancel()
+	defer handler.close()
+
+	select {
+	case msg, ok := <-handler.receiveMessages():
+		if !ok {
+			t.Fatal("expected error message before channel close")
+		}
+		if msg["type"] != "error" {
+			t.Fatalf("expected error message type, got %v", msg["type"])
+		}
+		errText, _ := msg["error"].(string)
+		if errText == "" {
+			t.Fatal("expected non-empty error text")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for cancellation error")
+	}
+
+	if !errors.Is(handler.err(), context.Canceled) {
+		t.Fatalf("expected read error context canceled, got %v", handler.err())
+	}
+}
